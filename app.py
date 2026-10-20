@@ -20,7 +20,7 @@ _tpl.layout.update(
 pio.templates["fiskal"] = _tpl
 pio.templates.default = "fiskal"
 
-st.set_page_config(page_title="Dashboard Fiskal 97 Kota", layout="wide")
+st.set_page_config(page_title="Dashboard Fiskal 97 Kota", page_icon="📊", layout="wide")
 
 TARGETS = ["KEMISKINAN", "PENGANGGURAN", "KETIMPANGAN", "IPM", "PE"]
 LABEL = {
@@ -72,13 +72,13 @@ with tab1:
     ind = c1.selectbox("Indikator tren", TARGETS, format_func=LABEL.get)
     tren = dff.groupby("Tahun")[ind].mean().reset_index()
     c1.plotly_chart(px.line(tren, x="Tahun", y=ind, markers=True,
-                            title=f"Rata-rata {LABEL[ind]} per tahun"), use_container_width=True, theme=None)
+                            title=f"Rata-rata {LABEL[ind]} per tahun"), width="stretch", theme=None)
 
     tahun_rank = c2.selectbox("Tahun peringkat", sorted(dff.Tahun.unique(), reverse=True))
     rank = dff[dff.Tahun == tahun_rank].nlargest(10, ind)[["Kota", ind]]
     c2.plotly_chart(px.bar(rank.sort_values(ind), x=ind, y="Kota", orientation="h",
                            title=f"10 kota tertinggi – {LABEL[ind]} ({tahun_rank})"),
-                    use_container_width=True, theme=None)
+                    width="stretch", theme=None)
 
     st.info(
         f"**Interpretasi:** rata-rata {LABEL[ind]} pada {tren.Tahun.iloc[0]} adalah "
@@ -94,7 +94,7 @@ with tab2:
     if len(kolom_kor) >= 2:
         cm = dff[kolom_kor].corr()
         st.plotly_chart(px.imshow(cm, text_auto=".2f", color_continuous_scale="BrBG",
-                                  zmin=-1, zmax=1, aspect="auto"), use_container_width=True, theme=None)
+                                  zmin=-1, zmax=1, aspect="auto"), width="stretch", theme=None)
         pairs = (cm.where(np.triu(np.ones(cm.shape), 1).astype(bool)).stack()
                    .sort_values(key=abs, ascending=False))
         if len(pairs):
@@ -110,7 +110,7 @@ with tab2:
     warna = s3.checkbox("Warnai per tahun")
     st.plotly_chart(px.scatter(dff, x=x, y=y, color="Tahun" if warna else None,
                                hover_name="Kota", trendline="ols", opacity=.6),
-                    use_container_width=True, theme=None)
+                    width="stretch", theme=None)
     r = dff[[x, y]].corr().iloc[0, 1]
     st.info(f"**Interpretasi:** r({x}, {y}) = {r:.3f}. "
             + ("Ada pola linear yang cukup jelas." if abs(r) >= .3
@@ -121,90 +121,103 @@ with tab3:
     st.subheader("Model prediksi")
     m1, m2, m3 = st.columns(3)
     target = m1.selectbox("Target (Y)", TARGETS, format_func=LABEL.get, key="tg")
-    algo = m2.selectbox("Algoritma", ["Random Forest", "Regresi Linear"])
+    algo = m2.selectbox("Algoritma", ["Regresi Linear", "Random Forest"])
     split = m3.selectbox("Cara split", ["Acak 80/20", "Berdasarkan waktu (uji = 2 tahun terakhir)"])
     fitur = st.multiselect("Fitur (X)", fitur_all, default=fitur_all)
 
+    @st.cache_data(show_spinner="Melatih model...")
+    def latih_dan_evaluasi(algo, fitur, target, split):
+        fitur = list(fitur)
+        if split.startswith("Acak"):
+            Xtr, Xte, ytr, yte = train_test_split(df[fitur], df[target], test_size=.2, random_state=42)
+        else:
+            batas = df.Tahun.max() - 2
+            tr, te = df[df.Tahun <= batas], df[df.Tahun > batas]
+            Xtr, ytr, Xte, yte = tr[fitur], tr[target], te[fitur], te[target]
+
+        model = (RandomForestRegressor(n_estimators=100, max_depth=8, min_samples_leaf=5,
+                                       random_state=42, n_jobs=1)
+                 if algo == "Random Forest" else LinearRegression())
+        model.fit(Xtr, ytr)
+        pred = model.predict(Xte)
+        imp = permutation_importance(model, Xte, yte, n_repeats=5, random_state=42, n_jobs=1)
+        imp_df = (pd.DataFrame({"Fitur": fitur, "Pentingnya": imp.importances_mean, "SD": imp.importances_std})
+                  .sort_values("Pentingnya"))
+        koef = (pd.DataFrame({"Fitur": fitur, "Koefisien": model.coef_}).sort_values("Koefisien")
+                if algo == "Regresi Linear" else None)
+        return {
+            "model": model, "yte": yte.to_numpy(), "pred": pred, "imp_df": imp_df, "koef": koef,
+            "r2": r2_score(yte, pred), "mae": mean_absolute_error(yte, pred),
+            "rmse": mean_squared_error(yte, pred) ** .5,
+            "base_mae": mean_absolute_error(yte, np.full(len(yte), ytr.mean())),
+        }
+
     if len(fitur) < 1:
         st.warning("Pilih minimal satu fitur.")
-        st.stop()
+    elif st.button("🚀 Latih model", type="primary"):
+        st.session_state["ml"] = (latih_dan_evaluasi(algo, tuple(fitur), target, split), target, algo, tuple(fitur))
 
-    # model dilatih dari seluruh df (bukan dff) supaya stabil terhadap filter
-    if split.startswith("Acak"):
-        Xtr, Xte, ytr, yte = train_test_split(df[fitur], df[target], test_size=.2, random_state=42)
+    if "ml" not in st.session_state:
+        st.info("Atur pilihan di atas, lalu klik **Latih model**. Regresi Linear paling ringan; "
+                "Random Forest lebih berat.")
     else:
-        batas = df.Tahun.max() - 2
-        tr, te = df[df.Tahun <= batas], df[df.Tahun > batas]
-        Xtr, ytr, Xte, yte = tr[fitur], tr[target], te[fitur], te[target]
+        res, target_m, algo_m, fitur_m = st.session_state["ml"]
+        r2, mae, rmse, base_mae = res["r2"], res["mae"], res["rmse"], res["base_mae"]
+        imp_df, model = res["imp_df"], res["model"]
+        st.caption(f"Hasil terakhir: target **{LABEL[target_m]}**, algoritma **{algo_m}**.")
 
-    @st.cache_resource
-    def latih(algo, fitur, target, split):
-        model = (RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=42, n_jobs=-1)
-                 if algo == "Random Forest" else LinearRegression())
-        return model.fit(Xtr, ytr)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("R² (data uji)", f"{r2:.3f}")
+        k2.metric("MAE", f"{mae:.3f}")
+        k3.metric("RMSE", f"{rmse:.3f}")
+        k4.metric("MAE baseline (tebak rata-rata)", f"{base_mae:.3f}")
 
-    model = latih(algo, tuple(fitur), target, split)
-    pred = model.predict(Xte)
-    r2 = r2_score(yte, pred)
-    mae = mean_absolute_error(yte, pred)
-    rmse = mean_squared_error(yte, pred) ** .5
-    base_mae = mean_absolute_error(yte, np.full(len(yte), ytr.mean()))
+        g1, g2 = st.columns(2)
+        yte, pred = res["yte"], res["pred"]
+        fig = px.scatter(x=yte, y=pred, labels={"x": "Aktual", "y": "Prediksi"}, opacity=.6,
+                         title="Aktual vs Prediksi")
+        lo, hi = float(min(yte.min(), pred.min())), float(max(yte.max(), pred.max()))
+        fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="ideal", line=dict(dash="dash")))
+        g1.plotly_chart(fig, width="stretch", theme=None)
+        g2.plotly_chart(px.bar(imp_df.tail(10), x="Pentingnya", y="Fitur", orientation="h",
+                               error_x="SD", title="Permutation importance (10 teratas)"),
+                        width="stretch", theme=None)
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("R² (data uji)", f"{r2:.3f}")
-    k2.metric("MAE", f"{mae:.3f}")
-    k3.metric("RMSE", f"{rmse:.3f}")
-    k4.metric("MAE baseline (tebak rata-rata)", f"{base_mae:.3f}")
+        # ---- interpretasi otomatis
+        if r2 >= .6:
+            kualitas = "**baik**: model menjelaskan sebagian besar variasi data uji."
+        elif r2 >= .3:
+            kualitas = "**sedang**: ada pola, tetapi masih banyak variasi yang tidak terjelaskan."
+        elif r2 >= .1:
+            kualitas = "**lemah**: daya prediksi rendah."
+        else:
+            kualitas = ("**sangat lemah / tidak ada**: model tidak lebih baik daripada menebak rata-rata. "
+                        "Artinya fitur yang dipakai tidak cukup menjelaskan target pada data ini.")
+        teratas = imp_df.iloc[-1]
+        st.info(
+            f"**Interpretasi:** R² = {r2:.3f} → kemampuan prediksi {kualitas}  \n"
+            f"Rata-rata kesalahan (MAE) {mae:.3f} vs {base_mae:.3f} bila hanya menebak rata-rata "
+            f"({'lebih baik' if mae < base_mae else 'tidak lebih baik'}).  \n"
+            f"Fitur dengan kontribusi terbesar: **{teratas.Fitur}** "
+            f"(penurunan R² bila diacak = {teratas.Pentingnya:.4f}). "
+            + ("Nilai importance mendekati 0 untuk semua fitur berarti tidak ada fitur yang benar-benar berpengaruh."
+               if imp_df.Pentingnya.max() < .01 else "")
+        )
+        if res["koef"] is not None:
+            st.dataframe(res["koef"], width="stretch")
+            st.caption("Koefisien = perubahan prediksi target bila fitur naik 1 satuan (fitur lain tetap).")
 
-    g1, g2 = st.columns(2)
-    fig = px.scatter(x=yte, y=pred, labels={"x": "Aktual", "y": "Prediksi"}, opacity=.6,
-                     title="Aktual vs Prediksi")
-    lo, hi = float(min(yte.min(), pred.min())), float(max(yte.max(), pred.max()))
-    fig.add_trace(go.Scatter(x=[lo, hi], y=[lo, hi], mode="lines", name="ideal", line=dict(dash="dash")))
-    g1.plotly_chart(fig, use_container_width=True, theme=None)
-
-    imp = permutation_importance(model, Xte, yte, n_repeats=10, random_state=42, n_jobs=-1)
-    imp_df = (pd.DataFrame({"Fitur": fitur, "Pentingnya": imp.importances_mean, "SD": imp.importances_std})
-              .sort_values("Pentingnya"))
-    g2.plotly_chart(px.bar(imp_df.tail(10), x="Pentingnya", y="Fitur", orientation="h",
-                           error_x="SD", title="Permutation importance (10 teratas)"),
-                    use_container_width=True, theme=None)
-
-    # ---- interpretasi otomatis
-    if r2 >= .6:
-        kualitas = "**baik**: model menjelaskan sebagian besar variasi data uji."
-    elif r2 >= .3:
-        kualitas = "**sedang**: ada pola, tetapi masih banyak variasi yang tidak terjelaskan."
-    elif r2 >= .1:
-        kualitas = "**lemah**: daya prediksi rendah."
-    else:
-        kualitas = ("**sangat lemah / tidak ada**: model tidak lebih baik daripada menebak rata-rata. "
-                    "Artinya fitur yang dipakai tidak cukup menjelaskan target pada data ini.")
-    teratas = imp_df.iloc[-1]
-    st.info(
-        f"**Interpretasi:** R² = {r2:.3f} → kemampuan prediksi {kualitas}  \n"
-        f"Rata-rata kesalahan (MAE) {mae:.3f} vs {base_mae:.3f} bila hanya menebak rata-rata "
-        f"({'lebih baik' if mae < base_mae else 'tidak lebih baik'}).  \n"
-        f"Fitur dengan kontribusi terbesar: **{teratas.Fitur}** "
-        f"(penurunan R² bila diacak = {teratas.Pentingnya:.4f}). "
-        + ("Nilai importance mendekati 0 untuk semua fitur berarti tidak ada fitur yang benar-benar berpengaruh."
-           if imp_df.Pentingnya.max() < .01 else "")
-    )
-    if algo == "Regresi Linear":
-        koef = pd.DataFrame({"Fitur": fitur, "Koefisien": model.coef_}).sort_values("Koefisien")
-        st.dataframe(koef, use_container_width=True)
-        st.caption("Koefisien = perubahan prediksi target bila fitur naik 1 satuan (fitur lain tetap).")
-
-    # ---- simulasi prediksi (what-if)
-    st.subheader("Simulasi prediksi")
-    cols = st.columns(4)
-    input_user = {}
-    for i, f in enumerate(fitur):
-        input_user[f] = cols[i % 4].slider(f, float(df[f].min()), float(df[f].max()), float(df[f].median()))
-    hasil = model.predict(pd.DataFrame([input_user]))[0]
-    st.success(f"Prediksi {LABEL[target]}: **{hasil:.2f}**  (±{rmse:.2f} perkiraan galat)")
+        # ---- simulasi prediksi (what-if)
+        st.subheader("Simulasi prediksi")
+        cols = st.columns(4)
+        input_user = {}
+        for i, f in enumerate(fitur_m):
+            input_user[f] = cols[i % 4].slider(f, float(df[f].min()), float(df[f].max()),
+                                               float(df[f].median()), key=f"sim_{f}")
+        hasil = model.predict(pd.DataFrame([input_user]))[0]
+        st.success(f"Prediksi {LABEL[target_m]}: **{hasil:.2f}**  (±{rmse:.2f} perkiraan galat)")
 
 # ---------------------------------------------------------------- TAB 4
 with tab4:
-    st.dataframe(dff, use_container_width=True)
+    st.dataframe(dff, width="stretch")
     st.download_button("Unduh data terfilter (CSV)", dff.to_csv(index=False).encode(), "data_terfilter.csv")
